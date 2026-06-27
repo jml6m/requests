@@ -218,7 +218,19 @@ class HTTPDigestAuth(AuthBase):
         if p_parsed.query:
             path += f"?{p_parsed.query}"
 
-        A1 = f"{self.username}:{realm}:{self.password}"
+        # Normalize username and password to str for use in digest computation
+        # and header construction. bytes values are decoded as UTF-8.
+        if isinstance(self.username, bytes):
+            username = self.username.decode("utf-8")
+        else:
+            username = self.username
+
+        if isinstance(self.password, bytes):
+            password = self.password.decode("utf-8")
+        else:
+            password = self.password
+
+        A1 = f"{username}:{realm}:{password}"
         A2 = f"{method}:{path}"
 
         HA1 = hash_utf8(A1)
@@ -250,10 +262,30 @@ class HTTPDigestAuth(AuthBase):
         self._thread_local.last_nonce = nonce
 
         # XXX should the partial digests be encoded too?
-        base = (
-            f'username="{self.username}", realm="{realm}", nonce="{nonce}", '
-            f'uri="{path}", response="{respdig}"'
-        )
+        # If the username contains non-ASCII characters, use the RFC 7616
+        # extended notation (username*, RFC 5987) so the header remains valid.
+        try:
+            username.encode("ascii")
+            username_is_ascii = True
+        except UnicodeEncodeError:
+            username_is_ascii = False
+
+        if username_is_ascii:
+            base = (
+                f'username="{username}", realm="{realm}", nonce="{nonce}", '
+                f'uri="{path}", response="{respdig}"'
+            )
+        else:
+            # Encode the username with RFC 5987: charset'language'percent-encoded-value
+            username_encoded = username.encode("utf-8").hex()
+            username_star = "UTF-8''" + "".join(
+                f"%{username_encoded[i:i+2].upper()}"
+                for i in range(0, len(username_encoded), 2)
+            )
+            base = (
+                f'username="", username*={username_star}, realm="{realm}", '
+                f'nonce="{nonce}", uri="{path}", response="{respdig}"'
+            )
         if opaque:
             base += f', opaque="{opaque}"'
         if algorithm:
